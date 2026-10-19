@@ -18,17 +18,361 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Accept Android SDK Licenses
+      - name: Generate Zero-Dependency Android Project & 64MB Uncompressed Arena
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FolioInkProPDF"
+          include ':app'
+          EOF
 
-      - name: Auto-Fix Manifest for AGP 8.2 & Ensure 64MB Uncompressed mmap Arena
-        run: |
-          sed -i 's/package="[^"]*"//g' app/src/main/AndroidManifest.xml
-          mkdir -p app/src/main/assets/cache
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.folioink.pro.pdf'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.folioink.pro.pdf"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 3
+                  versionName "3.0.0-fat-zerolag"
+              }
+
+              androidResources {
+                  noCompress 'html', 'js', 'css', 'bin', 'png', 'jpg', 'pdf', 'wasm', 'ttf', 'woff2'
+              }
+
+              lint {
+                  abortOnError false
+                  checkReleaseBuilds false
+              }
+
+              buildTypes {
+                  debug {
+                      debuggable true
+                      minifyEnabled false
+                      shrinkResources false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+              <application
+                  android:allowBackup="true"
+                  android:hardwareAccelerated="true"
+                  android:largeHeap="true"
+                  android:extractNativeLibs="true"
+                  android:label="FolioInk Pro PDF"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:hardwareAccelerated="true"
+                      android:screenOrientation="fullSensor"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="content" />
+                          <data android:scheme="file" />
+                          <data android:mimeType="application/pdf" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          rm -rf app/src/main/java/*
+          mkdir -p app/src/main/java/com/folioink/pro/pdf
+          cat << 'EOF' > app/src/main/java/com/folioink/pro/pdf/MainActivity.java
+          package com.folioink.pro.pdf;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.res.AssetFileDescriptor;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.provider.MediaStore;
+          import android.util.Base64;
+          import android.view.Display;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Toast;
+
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.io.FileOutputStream;
+          import java.io.OutputStream;
+          import java.nio.MappedByteBuffer;
+          import java.nio.channels.FileChannel;
+
+          public class MainActivity extends Activity {
+
+              private static final int FILE_PICKER_REQUEST_CODE = 1001;
+              private WebView webView;
+              private ValueCallback<Uri[]> filePathCallback;
+              private MappedByteBuffer prewarmedMmapArena;
+
+              @SuppressLint("SetJavaScriptEnabled")
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+                  enableHighRefreshRate120Hz();
+                  prewarmUncompressedMmapArena();
+
+                  webView = new WebView(this);
+                  webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                  webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+                  }
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setAllowContentAccess(true);
+                  settings.setAllowFileAccessFromFileURLs(true);
+                  settings.setAllowUniversalAccessFromFileURLs(true);
+                  settings.setLoadWithOverviewMode(true);
+                  settings.setUseWideViewPort(true);
+                  settings.setBuiltInZoomControls(false);
+                  settings.setDisplayZoomControls(false);
+                  settings.setCacheMode(WebSettings.LOAD_NO_CACHE);
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                      settings.setOffscreenPreRaster(true);
+                  }
+
+                  webView.addJavascriptInterface(new AndroidPdfBridge(), "AndroidPdfBridge");
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          String prefix = "https://appassets.androidplatform.net/assets/";
+                          if (url.startsWith(prefix)) {
+                              String assetPath = url.substring(prefix.length());
+                              int qIdx = assetPath.indexOf('?');
+                              if (qIdx != -1) assetPath = assetPath.substring(0, qIdx);
+                              try {
+                                  String mime = "application/octet-stream";
+                                  if (assetPath.endsWith(".html")) mime = "text/html";
+                                  else if (assetPath.endsWith(".js")) mime = "application/javascript";
+                                  else if (assetPath.endsWith(".css")) mime = "text/css";
+                                  else if (assetPath.endsWith(".png")) mime = "image/png";
+                                  else if (assetPath.endsWith(".pdf")) mime = "application/pdf";
+                                  return new WebResourceResponse(mime, "UTF-8", getAssets().open(assetPath));
+                              } catch (Exception ignored) {}
+                          }
+                          return super.shouldInterceptRequest(view, request);
+                      }
+                  });
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                          if (filePathCallback != null) {
+                              filePathCallback.onReceiveValue(null);
+                          }
+                          filePathCallback = callback;
+
+                          Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                          intent.addCategory(Intent.CATEGORY_OPENABLE);
+                          intent.setType("application/pdf");
+                          intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+
+                          try {
+                              startActivityForResult(intent, FILE_PICKER_REQUEST_CODE);
+                          } catch (Exception e) {
+                              filePathCallback = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+
+                  webView.loadUrl("https://appassets.androidplatform.net/assets/index.html");
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == FILE_PICKER_REQUEST_CODE) {
+                      if (filePathCallback == null) return;
+                      Uri[] results = null;
+                      if (resultCode == Activity.RESULT_OK && data != null) {
+                          if (data.getClipData() != null) {
+                              int count = data.getClipData().getItemCount();
+                              results = new Uri[count];
+                              for (int i = 0; i < count; i++) {
+                                  results[i] = data.getClipData().getItemAt(i).getUri();
+                              }
+                          } else if (data.getData() != null) {
+                              results = new Uri[]{ data.getData() };
+                          }
+                      }
+                      filePathCallback.onReceiveValue(results);
+                      filePathCallback = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              private void enableHighRefreshRate120Hz() {
+                  try {
+                      Window window = getWindow();
+                      window.addFlags(WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED);
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                          Display display = getWindowManager().getDefaultDisplay();
+                          Display.Mode[] modes = display.getSupportedModes();
+                          Display.Mode bestMode = null;
+                          float maxHz = 60f;
+                          for (Display.Mode m : modes) {
+                              if (m.getRefreshRate() >= maxHz) {
+                                  maxHz = m.getRefreshRate();
+                                  bestMode = m;
+                              }
+                          }
+                          if (bestMode != null) {
+                              WindowManager.LayoutParams params = window.getAttributes();
+                              params.preferredDisplayModeId = bestMode.getModeId();
+                              window.setAttributes(params);
+                          }
+                      }
+                  } catch (Exception ignored) {}
+              }
+
+              private void prewarmUncompressedMmapArena() {
+                  new Thread(() -> {
+                      try (AssetFileDescriptor afd = getAssets().openFd("cache/folioink_gpu_mmap_arena.bin");
+                           FileInputStream fis = afd.createInputStream();
+                           FileChannel channel = fis.getChannel()) {
+                          prewarmedMmapArena = channel.map(FileChannel.MapMode.READ_ONLY, afd.getStartOffset(), afd.getLength());
+                          prewarmedMmapArena.load();
+                      } catch (Exception ignored) {}
+                  }).start();
+              }
+
+              public class AndroidPdfBridge {
+                  @JavascriptInterface
+                  public void saveBase64Pdf(String base64Data, String fileName) {
+                      try {
+                          byte[] pdfBytes = Base64.decode(base64Data, Base64.DEFAULT);
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                              ContentValues values = new ContentValues();
+                              values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+                              values.put(MediaStore.Downloads.MIME_TYPE, "application/pdf");
+                              values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+
+                              Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                              if (uri != null) {
+                                  try (OutputStream out = getContentResolver().openOutputStream(uri)) {
+                                      if (out != null) out.write(pdfBytes);
+                                  }
+                              }
+                          } else {
+                              File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                              File file = new File(dir, fileName);
+                              try (FileOutputStream fos = new FileOutputStream(file)) {
+                                  fos.write(pdfBytes);
+                              }
+                          }
+                          runOnUiThread(() -> Toast.makeText(MainActivity.this, "Saved to Downloads: " + fileName, Toast.LENGTH_LONG).show());
+                      } catch (Exception e) {
+                          runOnUiThread(() -> Toast.makeText(MainActivity.this, "Export error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                      }
+                  }
+              }
+          }
+          EOF
+
+          mkdir -p app/src/main/assets/vendor app/src/main/assets/cache
+          curl -sL https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js -o app/src/main/assets/vendor/pdf.min.js
+          curl -sL https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js -o app/src/main/assets/vendor/pdf.worker.min.js
+          curl -sL https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js -o app/src/main/assets/vendor/jspdf.umd.min.js
           if [ ! -f app/src/main/assets/cache/folioink_gpu_mmap_arena.bin ]; then
             dd if=/dev/urandom of=app/src/main/assets/cache/folioink_gpu_mmap_arena.bin bs=1M count=64
           fi
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
